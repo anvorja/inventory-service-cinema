@@ -4,6 +4,7 @@ import json
 import logging
 import ssl
 
+import httpx
 from aiokafka import AIOKafkaConsumer
 from aiokafka.errors import KafkaConnectionError
 
@@ -13,11 +14,42 @@ from app.services.inventory import InventoryService
 
 logger = logging.getLogger(__name__)
 
-TOPICS = ["order.created"]
+TOPICS = ["order.created", "inventory.release"]
 _RESTART_DELAY_SECONDS = 10
 
 
+async def _seed_movie_on_demand(inventory: InventoryService, movie_id: int) -> bool:
+    """
+    Intenta sembrar el inventario de una película consultando catalog-service.
+    Retorna True si la siembra fue exitosa, False en caso contrario.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{settings.CATALOG_SERVICE_URL}/api/v1/movies/{movie_id}"
+            )
+            if resp.status_code == 404:
+                logger.warning("Movie %s not found in catalog — cannot seed inventory", movie_id)
+                return False
+            resp.raise_for_status()
+            data = resp.json()
+
+        available = data.get("available_tickets")
+        if available is None:
+            logger.warning("Movie %s has no available_tickets field in catalog response", movie_id)
+            return False
+
+        await inventory.seed(movie_id, available)
+        logger.info("On-demand seed | movie_id=%s | available=%s", movie_id, available)
+        return True
+
+    except Exception as e:
+        logger.error("On-demand seed failed | movie_id=%s | error=%s", movie_id, e)
+        return False
+
+
 async def _handle_order_created(payload: dict, inventory: InventoryService) -> None:
+    order_id = payload.get("order_id")
     movie_id = payload.get("movie_id")
     quantity = payload.get("quantity", 0)
     user_id = payload.get("user_id")
@@ -28,15 +60,18 @@ async def _handle_order_created(payload: dict, inventory: InventoryService) -> N
         movie_id, quantity, user_email,
     )
 
-    result = await inventory.reserve(movie_id, quantity)
+    result = await inventory.reserve(movie_id, quantity, order_id=order_id)
 
     if result == -2:
-        # Inventario no sembrado — registrar warning pero no bloquear
-        # (cineco-api tiene su propio check en BD como segunda capa de seguridad)
+        # Inventario no sembrado — intentar siembra on-demand desde catalog-service
         logger.warning(
-            "Inventory not seeded for movie_id=%s — skipping Redis check", movie_id
+            "Inventory not seeded for movie_id=%s — attempting on-demand seed", movie_id
         )
-        return
+        seeded = await _seed_movie_on_demand(inventory, movie_id)
+        if seeded:
+            result = await inventory.reserve(movie_id, quantity, order_id=order_id)
+        else:
+            result = -1  # Tratar como insuficiente si no se pudo sembrar
 
     if result == -1:
         logger.warning(
@@ -44,6 +79,7 @@ async def _handle_order_created(payload: dict, inventory: InventoryService) -> N
             movie_id, quantity, user_email,
         )
         await publish_event("inventory.insufficient", {
+            "order_id": order_id,
             "movie_id": movie_id,
             "quantity_requested": quantity,
             "user_id": user_id,
@@ -51,17 +87,34 @@ async def _handle_order_created(payload: dict, inventory: InventoryService) -> N
         })
         return
 
+    if result == -3:
+        logger.info("Duplicate reservation ignored | order_id=%s | movie_id=%s", order_id, movie_id)
+        return
+
     logger.info(
         "Inventory reserved | movie_id=%s | qty=%s | remaining=%s",
         movie_id, quantity, result,
     )
     await publish_event("inventory.reserved", {
+        "order_id": order_id,
         "movie_id": movie_id,
         "quantity": quantity,
         "remaining": result,
         "user_id": user_id,
         "user_email": user_email,
     })
+
+
+async def _handle_inventory_release(payload: dict, inventory: InventoryService) -> None:
+    order_id = payload.get("order_id")
+    movie_id = payload.get("movie_id")
+    quantity = payload.get("quantity", 0)
+
+    if not movie_id or quantity <= 0:
+        logger.warning("inventory.release payload inválido: %s", payload)
+        return
+
+    await inventory.release(movie_id, quantity, order_id=order_id)
 
 
 async def _run_consumer(inventory: InventoryService) -> None:
@@ -75,7 +128,8 @@ async def _run_consumer(inventory: InventoryService) -> None:
         sasl_plain_password=settings.KAFKA_API_SECRET,
         ssl_context=ssl_context,
         group_id=settings.KAFKA_GROUP_ID,
-        auto_offset_reset="earliest",
+        # Solo debe reaccionar a órdenes nuevas; el backlog histórico puede compensar dos veces.
+        auto_offset_reset="latest",
         value_deserializer=lambda v: json.loads(v.decode("utf-8")),
         enable_auto_commit=False,
     )
@@ -93,6 +147,8 @@ async def _run_consumer(inventory: InventoryService) -> None:
             try:
                 if topic == "order.created":
                     await _handle_order_created(payload, inventory)
+                elif topic == "inventory.release":
+                    await _handle_inventory_release(payload, inventory)
                 await consumer.commit()
             except asyncio.CancelledError:
                 raise

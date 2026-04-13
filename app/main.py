@@ -23,7 +23,7 @@ _inventory: InventoryService | None = None
 _consumer_task: asyncio.Task | None = None
 
 
-async def _seed_from_cineco_api(inventory: InventoryService) -> None:
+async def _seed_from_catalog(inventory: InventoryService) -> None:
     """
     Siembra el inventario Redis consultando catalog-service.
     Usa NX (no overwrite) para no pisar datos de una siembra previa.
@@ -80,7 +80,7 @@ async def lifespan(_app: FastAPI):
     await start_producer()
 
     # Sembrar inventario en background (no bloquea el arranque)
-    asyncio.create_task(_seed_from_cineco_api(_inventory))
+    asyncio.create_task(_seed_from_catalog(_inventory))
 
     # Kafka consumer supervisor
     _consumer_task = asyncio.create_task(start_consumer(_inventory))
