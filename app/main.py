@@ -25,14 +25,14 @@ _consumer_task: asyncio.Task | None = None
 
 async def _seed_from_cineco_api(inventory: InventoryService) -> None:
     """
-    Siembra el inventario Redis consultando cineco-api.
+    Siembra el inventario Redis consultando catalog-service.
     Usa NX (no overwrite) para no pisar datos de una siembra previa.
     Reintenta con backoff exponencial hasta 5 veces.
     """
     for attempt in range(5):
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(f"{settings.CINECO_API_URL}/api/v1/movies")
+                resp = await client.get(f"{settings.CATALOG_SERVICE_URL}/api/v1/movies")
                 resp.raise_for_status()
                 data = resp.json()
 
@@ -50,7 +50,7 @@ async def _seed_from_cineco_api(inventory: InventoryService) -> None:
             for movie in movies:
                 await inventory.seed(movie["id"], movie["available_tickets"])
 
-            logger.info("Inventory seeded from cineco-api | %d movies", len(movies))
+            logger.info("Inventory seeded from catalog-service | %d movies", len(movies))
             return
 
         except Exception as e:
@@ -61,7 +61,7 @@ async def _seed_from_cineco_api(inventory: InventoryService) -> None:
             await asyncio.sleep(wait)
 
     logger.error(
-        "Could not seed inventory from cineco-api after 5 attempts. "
+        "Could not seed inventory from catalog-service after 5 attempts. "
         "Service will rely on existing Redis state (if any)."
     )
 

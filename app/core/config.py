@@ -14,8 +14,8 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = ""
 
-    # URL interna de cineco-api para sembrar el inventario al arrancar
-    CINECO_API_URL: str = "http://cineco-api:8000"
+    # URL interna de catalog-service para sembrar el inventario al arrancar
+    CATALOG_SERVICE_URL: str = "http://catalog-service:8006"
 
     model_config = {
         "env_file": ".env",
