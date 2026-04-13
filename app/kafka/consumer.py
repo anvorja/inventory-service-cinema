@@ -54,6 +54,7 @@ async def _handle_order_created(payload: dict, inventory: InventoryService) -> N
     quantity = payload.get("quantity", 0)
     user_id = payload.get("user_id")
     user_email = payload.get("user_email", "?")
+    showtime_id = payload.get("showtime_id")
 
     logger.info(
         "order.created received | movie_id=%s | qty=%s | user=%s",
@@ -78,13 +79,16 @@ async def _handle_order_created(payload: dict, inventory: InventoryService) -> N
             "Inventory insufficient | movie_id=%s | qty_requested=%s | user=%s",
             movie_id, quantity, user_email,
         )
-        await publish_event("inventory.insufficient", {
+        evt: dict = {
             "order_id": order_id,
             "movie_id": movie_id,
             "quantity_requested": quantity,
             "user_id": user_id,
             "user_email": user_email,
-        })
+        }
+        if showtime_id is not None:
+            evt["showtime_id"] = showtime_id
+        await publish_event("inventory.insufficient", evt)
         return
 
     if result == -3:
@@ -95,14 +99,17 @@ async def _handle_order_created(payload: dict, inventory: InventoryService) -> N
         "Inventory reserved | movie_id=%s | qty=%s | remaining=%s",
         movie_id, quantity, result,
     )
-    await publish_event("inventory.reserved", {
+    reserved_evt: dict = {
         "order_id": order_id,
         "movie_id": movie_id,
         "quantity": quantity,
         "remaining": result,
         "user_id": user_id,
         "user_email": user_email,
-    })
+    }
+    if showtime_id is not None:
+        reserved_evt["showtime_id"] = showtime_id
+    await publish_event("inventory.reserved", reserved_evt)
 
 
 async def _handle_inventory_release(payload: dict, inventory: InventoryService) -> None:
