@@ -1,3 +1,5 @@
+alembic==1.16.5
+psycopg2-binary==2.9.10
 aiokafka==0.11.0
 fastapi==0.116.1
 uvicorn==0.35.0
