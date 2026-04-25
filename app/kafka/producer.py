@@ -51,14 +51,23 @@ async def stop_producer() -> None:
 
 
 async def publish_event(topic: str, payload: dict[str, Any]) -> None:
+    global _producer
+
+    # Lazy restart: if the producer failed to start initially, try again now.
     if _producer is None:
-        logger.debug("Kafka unavailable — '%s' not published", topic)
-        return
+        logger.warning("Kafka producer not available — attempting restart before publishing '%s'", topic)
+        await start_producer()
+
+    if _producer is None:
+        logger.error("Kafka producer unavailable — '%s' NOT published. Saga will stall.", topic)
+        raise RuntimeError(f"Kafka producer not available — '{topic}' not published")
 
     try:
         await _producer.send_and_wait(topic, value=payload)
         logger.info("Event published | topic=%s | keys=%s", topic, list(payload.keys()))
     except KafkaConnectionError as e:
         logger.error("Connection error publishing '%s': %s", topic, e)
+        raise
     except Exception as e:
         logger.error("Error publishing '%s': %s", topic, e)
+        raise

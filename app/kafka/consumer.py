@@ -92,7 +92,24 @@ async def _handle_order_created(payload: dict, inventory: InventoryService) -> N
         return
 
     if result == -3:
-        logger.info("Duplicate reservation ignored | order_id=%s | movie_id=%s", order_id, movie_id)
+        # Reservation already exists — booking may have missed the original inventory.reserved
+        # event (e.g. consumer restart with auto_offset_reset=latest). Re-publish so booking
+        # can proceed; the handler is idempotent on the booking side.
+        logger.info(
+            "Duplicate reservation — re-publishing inventory.reserved | order_id=%s | movie_id=%s",
+            order_id, movie_id,
+        )
+        dup_evt: dict = {
+            "order_id": order_id,
+            "movie_id": movie_id,
+            "quantity": quantity,
+            "remaining": -1,  # unknown at this point; booking does not use this field
+            "user_id": user_id,
+            "user_email": user_email,
+        }
+        if showtime_id is not None:
+            dup_evt["showtime_id"] = showtime_id
+        await publish_event("inventory.reserved", dup_evt)
         return
 
     logger.info(
