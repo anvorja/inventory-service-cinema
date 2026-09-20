@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from prometheus_fastapi_instrumentator import Instrumentator
 from redis.asyncio import Redis
 
 from app.core.config import settings
@@ -102,6 +103,9 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Inventory Service", lifespan=lifespan)
+
+# Métricas de Prometheus (latencia/conteo por endpoint) en /metrics
+Instrumentator().instrument(app).expose(app)
 
 
 @app.get("/health")
