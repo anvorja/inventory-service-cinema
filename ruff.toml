@@ -1,0 +1,12 @@
+# Lint del CI (job "Lint"): reglas por defecto de Ruff (errores de pyflakes y
+# de sintaxis). Versión fijada en .github/workflows/ci-cd.yml.
+target-version = "py312"
+
+[lint]
+# `Model.columna == True` es la forma de SQLAlchemy de filtrar por booleanos:
+# `is True` rompería la consulta.
+ignore = ["E712"]
+
+[lint.per-file-ignores]
+# Los modelos se importan aquí para registrarlos en SQLAlchemy.
+"app/models/__init__.py" = ["F401"]
