@@ -1,0 +1,124 @@
+name: CI/CD
+
+# CI en cada PR a main/develop. Los rulesets exigen como status checks los jobs "Lint", "Calidad y build", "Imagen Docker":
+# si se renombra uno, actualizar .github/rulesets/*.json.
+# CD, tras pasar los checks, con la misma imagen que probó CI (no se reconstruye):
+#   push a develop → Docker Hub `develop` + `<sha>`
+#   push a main    → Docker Hub `latest` + `<sha>`
+# Solo publica la imagen: no despliega en ningún servicio (tampoco en Render).
+# Secrets: DOCKER_USERNAME, DOCKER_TOKEN.
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    # El nombre del job es el status check que exigen los rulesets: mantenerlos sincronizados.
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Ruff (reglas en ruff.toml)
+        run: |
+          pip install ruff==0.13.0
+          ruff check --output-format=github .
+
+  quality:
+    name: Calidad y build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Dependencias
+        run: pip install -r requirements.txt
+      - name: Compilar todo el código
+        run: python -m compileall -q app
+      - name: La app carga (configuración e imports)
+        run: python -c "import app.main"
+
+  docker:
+    name: Imagen Docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: inventory-service-cinema:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Prueba de humo (la app carga dentro de la imagen, sin red)
+        run: docker run --rm --network none --entrypoint python inventory-service-cinema:ci -c "import app.main"
+      # En main y develop: la imagen probada viaja al job de publicación, que corre cuando pasan todos los checks.
+      - name: Guardar la imagen probada
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+        run: docker save inventory-service-cinema:ci | gzip > image.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+        with:
+          name: image
+          path: image.tar.gz
+          retention-days: 1
+
+  publish:
+    name: Publicar imagen
+    # Push a main o develop, y solo después de que pasaron los checks exigidos.
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    needs: [lint, quality, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      IMAGE: docker.io/${{ secrets.DOCKER_USERNAME }}/inventory-service-cinema
+      # latest = producción (main); develop = integración.
+      CHANNEL: ${{ github.ref == 'refs/heads/main' && 'latest' || 'develop' }}
+    steps:
+      - name: Obtener short SHA
+        id: vars
+        run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+
+      - name: Cargar la imagen probada (no se reconstruye)
+        run: gunzip -c image.tar.gz | docker load
+
+      - name: Login en Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Push a Docker Hub (canal y <sha>)
+        run: |
+          for tag in "$CHANNEL" "${{ steps.vars.outputs.SHORT_SHA }}"; do
+            docker tag inventory-service-cinema:ci "$IMAGE:$tag"
+            docker push "$IMAGE:$tag"
+          done
+          {
+            echo "### Imagen publicada"
+            echo "- \`$IMAGE:$CHANNEL\` y \`$IMAGE:${{ steps.vars.outputs.SHORT_SHA }}\`"
+            echo "- Esta imagen no se despliega sola: sirve para correr el servicio en cualquier lado."
+          } >> "$GITHUB_STEP_SUMMARY"

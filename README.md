@@ -77,3 +77,57 @@ Ver `../IMPLEMENTATION-GUIDE.md` para el procedimiento completo de arranque del 
 ---
 
 **Nota:** `requirements.txt` incluye `alembic` y `psycopg2-binary`, que este servicio no usa (no tiene base de datos SQL). Parecen arrastrados de otro `requirements.txt` del monorepo — no afectan el funcionamiento, pero son dependencias muertas.
+
+## Flujo de trabajo: Gitflow
+
+| Rama        | Sale de   | Entra a (vía PR)         | Método en GitHub | Para |
+| ----------- | --------- | ------------------------ | ---------------- | ---- |
+| `main`      | —         | —                        | —                | Lo que está en producción. Cada merge es una versión. |
+| `develop`   | `main`    | —                        | —                | Integración de lo próximo a publicar. Rama por defecto. |
+| `feature/*` | `develop` | `develop`                | **Squash**       | Una funcionalidad o cambio: `feature/mi-cambio`. |
+| `release/*` | `develop` | `main` y luego `develop` | **Merge** a `main`; **Squash** a `develop` | Preparar una versión: `release/1.0.0`. Solo ajustes finales. |
+| `hotfix/*`  | `main`    | `main` y luego `develop` | **Merge** a `main`; **Squash** a `develop` | Corrección urgente en producción. |
+
+- **Nadie hace push directo** a `main` ni a `develop`: todo entra por pull request, con los checks de CI en verde.
+- **En `develop` se usa squash:** cada feature queda como un solo commit con el título del PR.
+- **En `main` se usa merge commit:** cada release o hotfix queda visible como una unidad.
+- **Todavía no hay releases:** la app no está completa, así que `main` se queda como está hasta el
+  primer `release/*`. Desde entonces, cada versión se etiqueta en `main` (`git tag -a v1.0.0`) con
+  [versionado semántico](https://semver.org/lang/es/).
+
+```bash
+git switch develop && git pull
+git switch -c feature/mi-cambio
+# ...commits...
+git push -u origin feature/mi-cambio   # abrir PR hacia develop → Squash and merge
+```
+
+## CI/CD
+
+GitHub Actions (`.github/workflows/`) corre en cada PR hacia `main` o `develop`. Los rulesets exigen
+estos checks; si se renombra un job, hay que actualizar `.github/rulesets/*.json`.
+
+| Check | Qué revisa |
+| ----- | ---------- |
+| `Lint` | Ruff con las reglas de `ruff.toml`. |
+| `Calidad y build` | Instala las dependencias, compila todo el código y carga la app con configuración falsa (sin base de datos ni Kafka). |
+| `Imagen Docker` | Construye la imagen y comprueba que la app carga dentro de ella, sin red. |
+
+Con cada push a `develop` o `main` (es decir, al fusionar un PR), y solo si pasaron los checks, se
+publica en Docker Hub **la misma imagen que se probó** (no se reconstruye):
+
+- `develop` → `<usuario>/inventory-service-cinema:develop` y `:<sha>`
+- `main` → `<usuario>/inventory-service-cinema:latest` y `:<sha>`
+
+El flujo no despliega en ningún servicio (tampoco en Render): solo publica la imagen.
+
+### Configuración en GitHub (una vez)
+
+- **Rulesets:** `main` y `develop` se protegen importando `.github/rulesets/main.json` y
+  `.github/rulesets/develop.json` en *Settings → Rules → Rulesets → Import a ruleset*. Exigen PR, los
+  checks de la tabla de arriba, y no permiten borrar la rama ni forzar pushes. `main` solo acepta
+  merge commit y `develop` solo squash.
+- **Settings → General:** rama por defecto `develop`; permitir merge commits y squash (no rebase);
+  activar *Automatically delete head branches*.
+- **Secrets** (*Settings → Secrets and variables → Actions*): `DOCKER_USERNAME` y `DOCKER_TOKEN`
+  (token de acceso de Docker Hub con permiso de escritura).
